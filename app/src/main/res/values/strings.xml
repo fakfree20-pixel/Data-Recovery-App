@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">Deep Recovery</string>
+    <string name="scan_storage">Scan Storage</string>
+    <string name="scanning">Scanning storage for JPEG images...</string>
+    <string name="scan_complete">Scan complete. Found %d recovered JPEG(s).</string>
+    <string name="no_images_found">No recovered JPEG images found. Click Scan Storage to start.</string>
+    <string name="permission_required">Storage permission is required to scan and recover JPEG images.</string>
+    <string name="recover_action">Recover</string>
+    <string name="file_size">Size: %s</string>
+    <string name="file_path">Path: %s</string>
+</resources>

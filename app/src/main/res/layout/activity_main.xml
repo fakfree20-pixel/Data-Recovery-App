@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="?android:attr/windowBackground"
+    android:padding="16dp">
+
+    <!-- Header Card / Title -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Deep JPEG File Recovery"
+        android:textSize="22sp"
+        android:textStyle="bold"
+        android:textColor="?attr/colorPrimary"
+        android:gravity="center"
+        android:paddingBottom="4dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Scan device storage, cache, and media partitions to recover lost JPEG images."
+        android:textSize="14sp"
+        android:gravity="center"
+        android:paddingBottom="16dp"
+        android:alpha="0.7" />
+
+    <!-- Action Button -->
+    <Button
+        android:id="@+id/btnScanStorage"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:text="@string/scan_storage"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        app:icon="@drawable/ic_launcher_foreground"
+        app:iconGravity="textStart" />
+
+    <!-- Status & Progress -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingTop="12dp"
+        android:paddingBottom="12dp">
+
+        <ProgressBar
+            android:id="@+id/progressBar"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:indeterminate="true"
+            android:visibility="gone"
+            android:layout_marginEnd="8dp" />
+
+        <TextView
+            android:id="@+id/tvStatus"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/no_images_found"
+            android:textSize="14sp" />
+    </LinearLayout>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="?android:attr/listDivider"
+        android:layout_marginBottom="8dp" />
+
+    <!-- RecyclerView for Recovered Images -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/recyclerViewImages"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:paddingBottom="16dp" />
+
+        <TextView
+            android:id="@+id/tvEmptyState"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="No JPEGs recovered yet.\nTap 'Scan Storage' to begin."
+            android:textAlignment="center"
+            android:textSize="15sp"
+            android:alpha="0.5" />
+
+    </FrameLayout>
+
+</LinearLayout>
