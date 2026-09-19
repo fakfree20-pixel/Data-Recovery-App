@@ -15,7 +15,7 @@ struct CarvedResult {
 };
 
 extern "C" JNIEXPORT jobjectArray JNICALL
-Java_com_example_MainActivity_nativeScanFile(
+Java_com_example_MainActivity_scanFileHeaders(
         JNIEnv* env,
         jobject /* this */,
         jstring filePathStr) {

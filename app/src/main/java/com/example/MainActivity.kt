@@ -2,11 +2,14 @@ package com.example
 
 import android.Manifest
 import android.content.ContentUris
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.MediaStore
+import android.provider.Settings
 import android.view.View
 import android.widget.Button
 import android.widget.ProgressBar
@@ -28,11 +31,11 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         init {
-            System.loadLibrary("nativecarver")
+            System.loadLibrary("datarecovery")
         }
     }
 
-    external fun nativeScanFile(filePath: String): Array<String>?
+    external fun scanFileHeaders(filePath: String): Array<String>?
 
     private lateinit var btnScanStorage: Button
     private lateinit var progressBar: ProgressBar
@@ -51,6 +54,19 @@ class MainActivity : AppCompatActivity() {
         } else {
             Toast.makeText(this, R.string.permission_required, Toast.LENGTH_LONG).show()
             tvStatus.text = getString(R.string.permission_required)
+        }
+    }
+
+    private val manageStorageLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { _ ->
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (Environment.isExternalStorageManager()) {
+                startStorageScan()
+            } else {
+                Toast.makeText(this, "All Files Access permission required", Toast.LENGTH_LONG).show()
+                tvStatus.text = "Permission denied"
+            }
         }
     }
 
@@ -76,16 +92,32 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkAndRequestPermission() {
-        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            Manifest.permission.READ_MEDIA_IMAGES
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (Environment.isExternalStorageManager()) {
+                startStorageScan()
+            } else {
+                try {
+                    val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    manageStorageLauncher.launch(intent)
+                } catch (e: Exception) {
+                    val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                    manageStorageLauncher.launch(intent)
+                }
+            }
         } else {
-            Manifest.permission.READ_EXTERNAL_STORAGE
-        }
+            val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                Manifest.permission.READ_MEDIA_IMAGES
+            } else {
+                Manifest.permission.READ_EXTERNAL_STORAGE
+            }
 
-        if (ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED) {
-            startStorageScan()
-        } else {
-            permissionLauncher.launch(permission)
+            if (ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED) {
+                startStorageScan()
+            } else {
+                permissionLauncher.launch(permission)
+            }
         }
     }
 

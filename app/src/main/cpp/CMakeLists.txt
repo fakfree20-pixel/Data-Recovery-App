@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.22.1)
-project("nativecarver")
+project("datarecovery")
 
 add_library(
-        nativecarver
+        datarecovery
         SHARED
         native-lib.cpp
 )
@@ -13,6 +13,7 @@ find_library(
 )
 
 target_link_libraries(
-        nativecarver
+        datarecovery
         ${log-lib}
 )
+
