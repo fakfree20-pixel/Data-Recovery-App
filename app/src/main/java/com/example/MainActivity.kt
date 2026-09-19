@@ -26,6 +26,14 @@ import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
+    companion object {
+        init {
+            System.loadLibrary("nativecarver")
+        }
+    }
+
+    external fun nativeScanFile(filePath: String): Array<String>?
+
     private lateinit var btnScanStorage: Button
     private lateinit var progressBar: ProgressBar
     private lateinit var tvStatus: TextView
