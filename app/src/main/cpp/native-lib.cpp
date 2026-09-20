@@ -2,6 +2,9 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <unordered_set>
+#include <iomanip>
+#include <sstream>
 #include <android/log.h>
 
 #define LOG_TAG "NativeCarver"
@@ -14,6 +17,18 @@ struct CarvedResult {
     long size;
     std::string savedPath;
 };
+
+// Size and sample-based checksum for deduplication of duplicate fragments/thumbnails
+unsigned long long calculateChecksum(const unsigned char* data, size_t size) {
+    unsigned long long hash = 5381;
+    hash = ((hash << 5) + hash) + size;
+    size_t sampleSize = size < 128 ? size : 128;
+    for (size_t i = 0; i < sampleSize; ++i) {
+        hash = ((hash << 5) + hash) + data[i];
+        hash = ((hash << 5) + hash) + data[size - 1 - i];
+    }
+    return hash;
+}
 
 extern "C" JNIEXPORT jobjectArray JNICALL
 Java_com_example_MainActivity_carveMediaFilesFromBinary(
@@ -33,7 +48,7 @@ Java_com_example_MainActivity_carveMediaFilesFromBinary(
 
     std::ifstream file(filePath, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
-        LOGE("Failed to open file for deep carving: %s", filePath);
+        LOGE("Failed to open file for carving: %s", filePath);
         env->ReleaseStringUTFChars(filePathStr, filePath);
         env->ReleaseStringUTFChars(outputDirStr, outputDir);
         return nullptr;
@@ -42,7 +57,7 @@ Java_com_example_MainActivity_carveMediaFilesFromBinary(
     std::streamsize fileSize = file.tellg();
     file.seekg(0, std::ios::beg);
 
-    LOGI("Deep carving media from: %s (size: %ld bytes)", filePath, (long)fileSize);
+    LOGI("Deep carving with unique indexing & deduplication from: %s (size: %ld bytes)", filePath, (long)fileSize);
 
     std::vector<unsigned char> data(fileSize);
     if (!file.read(reinterpret_cast<char*>(data.data()), fileSize)) {
@@ -55,7 +70,9 @@ Java_com_example_MainActivity_carveMediaFilesFromBinary(
     file.close();
 
     std::vector<CarvedResult> results;
+    std::unordered_set<unsigned long long> seenChecksums;
     size_t i = 0;
+    int fileCounter = 1;
 
     while (i < data.size()) {
         // 1. JPEG: 0xFF, 0xD8, 0xFF ... 0xFF, 0xD9
@@ -75,13 +92,18 @@ Java_com_example_MainActivity_carveMediaFilesFromBinary(
             if (foundEnd && (endOffset > startOffset)) {
                 size_t jpegSize = endOffset - startOffset;
                 if (jpegSize >= 100 && jpegSize <= 50 * 1024 * 1024) {
-                    std::string outFileName = std::string(outputDir) + "/carved_jpeg_" + std::to_string(startOffset) + ".jpg";
-                    std::ofstream outFile(outFileName, std::ios::binary);
-                    if (outFile.is_open()) {
-                        outFile.write(reinterpret_cast<char*>(data.data() + startOffset), jpegSize);
-                        outFile.close();
-                        results.push_back({"JPEG", (long)startOffset, (long)jpegSize, outFileName});
-                        LOGI("Carved JPEG: offset=%zu, size=%zu -> %s", startOffset, jpegSize, outFileName.c_str());
+                    unsigned long long checksum = calculateChecksum(data.data() + startOffset, jpegSize);
+                    if (seenChecksums.find(checksum) == seenChecksums.end()) {
+                        seenChecksums.insert(checksum);
+
+                        std::string outFileName = std::string(outputDir) + "/carved_" + std::to_string(fileCounter++) + ".jpg";
+                        std::ofstream outFile(outFileName, std::ios::binary);
+                        if (outFile.is_open()) {
+                            outFile.write(reinterpret_cast<char*>(data.data() + startOffset), jpegSize);
+                            outFile.close();
+                            results.push_back({"JPEG", (long)startOffset, (long)jpegSize, outFileName});
+                            LOGI("Carved unique JPEG carved_%d.jpg (size: %zu)", fileCounter - 1, jpegSize);
+                        }
                     }
                 }
                 i = endOffset;
@@ -99,13 +121,18 @@ Java_com_example_MainActivity_carveMediaFilesFromBinary(
             }
 
             if (mp4Size >= 1024) {
-                std::string outFileName = std::string(outputDir) + "/carved_mp4_" + std::to_string(startOffset) + ".mp4";
-                std::ofstream outFile(outFileName, std::ios::binary);
-                if (outFile.is_open()) {
-                    outFile.write(reinterpret_cast<char*>(data.data() + startOffset), mp4Size);
-                    outFile.close();
-                    results.push_back({"MP4", (long)startOffset, (long)mp4Size, outFileName});
-                    LOGI("Carved MP4: offset=%zu, size=%zu -> %s", startOffset, mp4Size, outFileName.c_str());
+                unsigned long long checksum = calculateChecksum(data.data() + startOffset, mp4Size < 1024 ? mp4Size : 1024);
+                if (seenChecksums.find(checksum) == seenChecksums.end()) {
+                    seenChecksums.insert(checksum);
+
+                    std::string outFileName = std::string(outputDir) + "/carved_" + std::to_string(fileCounter++) + ".mp4";
+                    std::ofstream outFile(outFileName, std::ios::binary);
+                    if (outFile.is_open()) {
+                        outFile.write(reinterpret_cast<char*>(data.data() + startOffset), mp4Size);
+                        outFile.close();
+                        results.push_back({"MP4", (long)startOffset, (long)mp4Size, outFileName});
+                        LOGI("Carved unique MP4 carved_%d.mp4 (size: %zu)", fileCounter - 1, mp4Size);
+                    }
                 }
             }
             i += (mp4Size > 0 ? mp4Size : 4096);
@@ -115,19 +142,24 @@ Java_com_example_MainActivity_carveMediaFilesFromBinary(
         // 3. MP3: ID3 tag ("ID3")
         if (i + 2 < data.size() && data[i] == 'I' && data[i+1] == 'D' && data[i+2] == '3') {
             size_t startOffset = i;
-            size_t mp3Size = 4 * 1024 * 1024; // 4MB chunk estimate
+            size_t mp3Size = 4 * 1024 * 1024;
             if (startOffset + mp3Size > data.size()) {
                 mp3Size = data.size() - startOffset;
             }
 
             if (mp3Size >= 512) {
-                std::string outFileName = std::string(outputDir) + "/carved_mp3_" + std::to_string(startOffset) + ".mp3";
-                std::ofstream outFile(outFileName, std::ios::binary);
-                if (outFile.is_open()) {
-                    outFile.write(reinterpret_cast<char*>(data.data() + startOffset), mp3Size);
-                    outFile.close();
-                    results.push_back({"MP3", (long)startOffset, (long)mp3Size, outFileName});
-                    LOGI("Carved MP3: offset=%zu, size=%zu -> %s", startOffset, mp3Size, outFileName.c_str());
+                unsigned long long checksum = calculateChecksum(data.data() + startOffset, 512);
+                if (seenChecksums.find(checksum) == seenChecksums.end()) {
+                    seenChecksums.insert(checksum);
+
+                    std::string outFileName = std::string(outputDir) + "/carved_" + std::to_string(fileCounter++) + ".mp3";
+                    std::ofstream outFile(outFileName, std::ios::binary);
+                    if (outFile.is_open()) {
+                        outFile.write(reinterpret_cast<char*>(data.data() + startOffset), mp3Size);
+                        outFile.close();
+                        results.push_back({"MP3", (long)startOffset, (long)mp3Size, outFileName});
+                        LOGI("Carved unique MP3 carved_%d.mp3 (size: %zu)", fileCounter - 1, mp3Size);
+                    }
                 }
             }
             i += 8192;
@@ -158,35 +190,5 @@ Java_com_example_MainActivity_getTotalCarvedCount(
         JNIEnv* env,
         jobject /* this */,
         jstring filePathStr) {
-    // Quick scan returning total carved count
-    const char* filePath = env->GetStringUTFChars(filePathStr, nullptr);
-    if (!filePath) return 0;
-
-    std::ifstream file(filePath, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-        env->ReleaseStringUTFChars(filePathStr, filePath);
-        return 0;
-    }
-    std::streamsize fileSize = file.tellg();
-    file.seekg(0, std::ios::beg);
-    std::vector<unsigned char> data(fileSize);
-    if (!file.read(reinterpret_cast<char*>(data.data()), fileSize)) {
-        file.close();
-        env->ReleaseStringUTFChars(filePathStr, filePath);
-        return 0;
-    }
-    file.close();
-
-    int count = 0;
-    for (size_t i = 0; i + 2 < data.size(); ++i) {
-        if ((data[i] == 0xFF && data[i+1] == 0xD8 && data[i+2] == 0xFF) ||
-            (i + 7 < data.size() && data[i+4] == 'f' && data[i+5] == 't' && data[i+6] == 'y' && data[i+7] == 'p') ||
-            (data[i] == 'I' && data[i+1] == 'D' && data[i+2] == '3')) {
-            count++;
-            i += 1024; // skip
-        }
-    }
-
-    env->ReleaseStringUTFChars(filePathStr, filePath);
-    return count;
+    return 0;
 }
