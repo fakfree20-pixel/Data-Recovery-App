@@ -11,103 +11,98 @@
 struct CarvedResult {
     std::string fileType;
     long offset;
-    long estimatedSize;
+    long size;
+    std::string savedPath;
 };
 
 extern "C" JNIEXPORT jobjectArray JNICALL
-Java_com_example_MainActivity_scanFileHeaders(
+Java_com_example_MainActivity_carveJpegsFromBinary(
         JNIEnv* env,
         jobject /* this */,
-        jstring filePathStr) {
+        jstring filePathStr,
+        jstring outputDirStr) {
 
     const char* filePath = env->GetStringUTFChars(filePathStr, nullptr);
-    if (!filePath) {
+    const char* outputDir = env->GetStringUTFChars(outputDirStr, nullptr);
+
+    if (!filePath || !outputDir) {
+        if (filePath) env->ReleaseStringUTFChars(filePathStr, filePath);
+        if (outputDir) env->ReleaseStringUTFChars(outputDirStr, outputDir);
         return nullptr;
     }
 
     std::ifstream file(filePath, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
-        LOGE("Failed to open file for scanning: %s", filePath);
+        LOGE("Failed to open file for carving: %s", filePath);
         env->ReleaseStringUTFChars(filePathStr, filePath);
+        env->ReleaseStringUTFChars(outputDirStr, outputDir);
         return nullptr;
     }
 
     std::streamsize fileSize = file.tellg();
     file.seekg(0, std::ios::beg);
 
-    LOGI("Starting C++ deep carver scan on file: %s (size: %ld bytes)", filePath, (long)fileSize);
+    LOGI("Carving JPEGs from: %s (size: %ld bytes)", filePath, (long)fileSize);
 
-    const size_t CHUNK_SIZE = 65536; // 64KB buffer
-    std::vector<char> buffer(CHUNK_SIZE);
+    std::vector<unsigned char> data(fileSize);
+    if (!file.read(reinterpret_cast<char*>(data.data()), fileSize)) {
+        LOGE("Failed to read file into buffer");
+        file.close();
+        env->ReleaseStringUTFChars(filePathStr, filePath);
+        env->ReleaseStringUTFChars(outputDirStr, outputDir);
+        return nullptr;
+    }
+    file.close();
+
     std::vector<CarvedResult> results;
+    size_t i = 0;
 
-    long currentOffset = 0;
-    std::vector<char> prevChunkTail;
+    while (i + 1 < data.size()) {
+        // Look for JPEG Start of Image (SOI): 0xFF, 0xD8 (Start magic bytes 0xFFD8 / 0xFFD8FF)
+        if (data[i] == 0xFF && data[i+1] == 0xD8) {
+            size_t startOffset = i;
+            size_t endOffset = 0;
+            bool foundEnd = false;
 
-    while (file.read(buffer.data(), CHUNK_SIZE) || file.gcount() > 0) {
-        std::streamsize bytesRead = file.gcount();
-        
-        std::vector<char> searchBlock;
-        searchBlock.reserve(prevChunkTail.size() + bytesRead);
-        searchBlock.insert(searchBlock.end(), prevChunkTail.begin(), prevChunkTail.end());
-        searchBlock.insert(searchBlock.end(), buffer.data(), buffer.data() + bytesRead);
-
-        long blockBaseOffset = currentOffset - prevChunkTail.size();
-
-        for (size_t i = 0; i + 16 < searchBlock.size(); ++i) {
-            unsigned char b0 = searchBlock[i];
-            unsigned char b1 = searchBlock[i+1];
-            unsigned char b2 = searchBlock[i+2];
-            unsigned char b3 = searchBlock[i+3];
-
-            // 1. JPEG Magic Bytes: 0xFF 0xD8 0xFF
-            if (b0 == 0xFF && b1 == 0xD8 && b2 == 0xFF) {
-                long foundOffset = blockBaseOffset + i;
-                results.push_back({"JPEG", foundOffset, 1024 * 500});
-                LOGI("Carved JPEG at offset: %ld", foundOffset);
-            }
-
-            // 2. MP4 Video (ftyp box at offset +4)
-            if (i + 8 < searchBlock.size()) {
-                if (searchBlock[i+4] == 'f' && searchBlock[i+5] == 't' &&
-                    searchBlock[i+6] == 'y' && searchBlock[i+7] == 'p') {
-                    long foundOffset = blockBaseOffset + i;
-                    results.push_back({"MP4", foundOffset, 1024 * 1024 * 5});
-                    LOGI("Carved MP4 at offset: %ld", foundOffset);
+            // Search for End of Image (EOI): 0xFF, 0xD9
+            for (size_t j = startOffset + 2; j + 1 < data.size(); ++j) {
+                if (data[j] == 0xFF && data[j+1] == 0xD9) {
+                    endOffset = j + 2; // Include 0xFF 0xD9
+                    foundEnd = true;
+                    break;
                 }
             }
 
-            // 3. SQLite Database Header: "SQLite format 3\0" (16 bytes)
-            if (i + 15 < searchBlock.size()) {
-                if (b0 == 'S' && b1 == 'Q' && b2 == 'L' && b3 == 'i' &&
-                    searchBlock[i+4] == 't' && searchBlock[i+5] == 'e' &&
-                    searchBlock[i+6] == ' ' && searchBlock[i+7] == 'f' &&
-                    searchBlock[i+8] == 'o' && searchBlock[i+9] == 'r' &&
-                    searchBlock[i+10] == 'm' && searchBlock[i+11] == 'a' &&
-                    searchBlock[i+12] == 't' && searchBlock[i+13] == ' ' &&
-                    searchBlock[i+14] == '3' && searchBlock[i+15] == 0x00) {
-                    long foundOffset = blockBaseOffset + i;
-                    results.push_back({"SQLite", foundOffset, 1024 * 1024});
-                    LOGI("Carved SQLite DB at offset: %ld", foundOffset);
+            if (foundEnd && (endOffset > startOffset)) {
+                size_t jpegSize = endOffset - startOffset;
+                // Validate reasonable JPEG size (100 bytes to 50MB)
+                if (jpegSize >= 100 && jpegSize <= 50 * 1024 * 1024) {
+                    std::string outFileName = std::string(outputDir) + "/carved_" + std::to_string(startOffset) + ".jpg";
+                    
+                    std::ofstream outFile(outFileName, std::ios::binary);
+                    if (outFile.is_open()) {
+                        outFile.write(reinterpret_cast<char*>(data.data() + startOffset), jpegSize);
+                        outFile.close();
+
+                        results.push_back({"JPEG", (long)startOffset, (long)jpegSize, outFileName});
+                        LOGI("Successfully carved JPEG: offset=%zu, size=%zu -> %s", startOffset, jpegSize, outFileName.c_str());
+                    }
                 }
+                i = endOffset; // Advance past this JPEG
+                continue;
             }
         }
-
-        size_t tailSize = (bytesRead > 32) ? 32 : bytesRead;
-        prevChunkTail.assign(searchBlock.end() - tailSize, searchBlock.end());
-
-        currentOffset += bytesRead;
-        if (file.eof()) break;
+        ++i;
     }
 
-    file.close();
     env->ReleaseStringUTFChars(filePathStr, filePath);
+    env->ReleaseStringUTFChars(outputDirStr, outputDir);
 
     jclass resultClass = env->FindClass("java/lang/String");
     jobjectArray jResults = env->NewObjectArray(results.size(), resultClass, nullptr);
 
     for (size_t k = 0; k < results.size(); ++k) {
-        std::string info = results[k].fileType + "|" + std::to_string(results[k].offset) + "|" + std::to_string(results[k].estimatedSize);
+        std::string info = results[k].fileType + "|" + std::to_string(results[k].offset) + "|" + std::to_string(results[k].size) + "|" + results[k].savedPath;
         jstring jInfo = env->NewStringUTF(info.c_str());
         env->SetObjectArrayElement(jResults, k, jInfo);
         env->DeleteLocalRef(jInfo);

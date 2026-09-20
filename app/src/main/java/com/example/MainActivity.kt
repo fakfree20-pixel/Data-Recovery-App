@@ -35,7 +35,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    external fun scanFileHeaders(filePath: String): Array<String>?
+    external fun carveJpegsFromBinary(filePath: String, outputDir: String): Array<String>?
 
     private lateinit var btnScanStorage: Button
     private lateinit var progressBar: ProgressBar
@@ -129,6 +129,11 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch(Dispatchers.IO) {
             val results = mutableListOf<RecoveredImage>()
+            val seenPaths = mutableSetOf<String>()
+
+            val carvedOutputDir = File(filesDir, "CarvedJpegs").apply {
+                if (!exists()) mkdirs()
+            }
 
             // 1. Query MediaStore for JPEG images
             try {
@@ -162,30 +167,37 @@ class MainActivity : AppCompatActivity() {
                         val id = cursor.getLong(idCol)
                         val name = cursor.getString(nameCol) ?: "unknown.jpg"
                         val size = cursor.getLong(sizeCol)
-                        val path = cursor.getString(dataCol) ?: "/storage/emulated/0/Pictures/$name"
+                        val path = cursor.getString(dataCol) ?: continue
                         val date = cursor.getLong(dateCol)
                         val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
 
-                        results.add(RecoveredImage(id, name, size, path, uri, date))
+                        if (seenPaths.add(path)) {
+                            results.add(RecoveredImage(id, name, size, path, uri, date))
+                        }
                     }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
             }
 
-            // 2. Also deep scan cache / pictures directories for any JPEG files or signatures
-            try {
-                val dirsToScan = listOf(
-                    getExternalFilesDir(null),
-                    cacheDir,
-                    getExternalCacheDir()
-                )
+            // 2. Explicitly scan hidden directories (/DCIM/.thumbnails, WhatsApp media caches, etc.)
+            val externalDir = Environment.getExternalStorageDirectory()
+            val hiddenDirsToScan = listOfNotNull(
+                File(externalDir, "DCIM/.thumbnails"),
+                File(externalDir, "Pictures/.thumbnails"),
+                File(externalDir, "WhatsApp/Media/WhatsApp Images"),
+                File(externalDir, "WhatsApp/Media/WhatsApp Images/Sent"),
+                File(externalDir, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images"),
+                File(externalDir, "Android/data/com.whatsapp/cache"),
+                File(externalDir, "Telegram/Telegram Images"),
+                cacheDir,
+                getExternalFilesDir(null)
+            )
 
-                for (dir in dirsToScan) {
-                    dir?.let { scanDirectoryForJpegs(it, results) }
+            for (dir in hiddenDirsToScan) {
+                if (dir.exists() && dir.isDirectory) {
+                    scanHiddenDirectory(dir, results, seenPaths, carvedOutputDir)
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
             }
 
             withContext(Dispatchers.Main) {
@@ -197,7 +209,7 @@ class MainActivity : AppCompatActivity() {
 
                 if (recoveredList.isEmpty()) {
                     tvEmptyState.visibility = View.VISIBLE
-                    tvStatus.text = "Scan complete. No JPEG images found."
+                    tvStatus.text = "Scan complete. No JPEG images or deleted thumbnails found."
                 } else {
                     tvEmptyState.visibility = View.GONE
                     tvStatus.text = String.format(Locale.getDefault(), "Scan complete. Found %d recovered JPEG(s).", recoveredList.size)
@@ -206,41 +218,70 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun scanDirectoryForJpegs(dir: File, results: MutableList<RecoveredImage>) {
+    private fun scanHiddenDirectory(
+        dir: File,
+        results: MutableList<RecoveredImage>,
+        seenPaths: MutableSet<String>,
+        carvedOutputDir: File
+    ) {
         val files = dir.listFiles() ?: return
         for (file in files) {
-            if (file.isDirectory) {
-                scanDirectoryForJpegs(file, results)
-            } else if (file.isFile) {
-                val name = file.name.lowercase(Locale.getDefault())
-                if (name.endsWith(".jpg") || name.endsWith(".jpeg") || hasJpegHeader(file)) {
-                    val uri = Uri.fromFile(file)
-                    results.add(
-                        RecoveredImage(
-                            id = file.absolutePath.hashCode().toLong(),
-                            name = file.name,
-                            size = file.length(),
-                            path = file.absolutePath,
-                            uri = uri,
-                            dateModified = file.lastModified() / 1000
-                        )
-                    )
-                }
-            }
-        }
-    }
+            try {
+                if (file.isDirectory) {
+                    scanHiddenDirectory(file, results, seenPaths, carvedOutputDir)
+                } else if (file.isFile) {
+                    val path = file.absolutePath
+                    if (!seenPaths.contains(path)) {
+                        seenPaths.add(path)
+                        val name = file.name
+                        val lowerName = name.lowercase(Locale.getDefault())
 
-    private fun hasJpegHeader(file: File): Boolean {
-        if (file.length() < 3) return false
-        return try {
-            file.inputStream().use { input ->
-                val b1 = input.read()
-                val b2 = input.read()
-                val b3 = input.read()
-                b1 == 0xFF && b2 == 0xD8 && b3 == 0xFF
+                        if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg") || lowerName.endsWith(".thumbdata") || lowerName.contains("thumb")) {
+                            // Carve JPEGs using C++ native carver (0xFFD8FF / 0xFFD9)
+                            try {
+                                val carvedArray = carveJpegsFromBinary(path, carvedOutputDir.absolutePath)
+                                if (carvedArray != null && carvedArray.isNotEmpty()) {
+                                    carvedArray.forEach { carvedInfo ->
+                                        val parts = carvedInfo.split("|")
+                                        if (parts.size >= 4) {
+                                            val savedPath = parts[3]
+                                            val carvedFile = File(savedPath)
+                                            if (carvedFile.exists() && carvedFile.length() > 0) {
+                                                results.add(
+                                                    RecoveredImage(
+                                                        id = savedPath.hashCode().toLong(),
+                                                        name = carvedFile.name,
+                                                        size = carvedFile.length(),
+                                                        path = savedPath,
+                                                        uri = Uri.fromFile(carvedFile),
+                                                        dateModified = file.lastModified() / 1000
+                                                    )
+                                                )
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Add as normal file if it's already a valid image
+                                    results.add(
+                                        RecoveredImage(
+                                            id = path.hashCode().toLong(),
+                                            name = name,
+                                            size = file.length(),
+                                            path = path,
+                                            uri = Uri.fromFile(file),
+                                            dateModified = file.lastModified() / 1000
+                                        )
+                                    )
+                                }
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
-        } catch (e: Exception) {
-            false
         }
     }
 }
