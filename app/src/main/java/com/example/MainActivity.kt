@@ -35,7 +35,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    external fun carveJpegsFromBinary(filePath: String, outputDir: String): Array<String>?
+    external fun carveMediaFilesFromBinary(filePath: String, outputDir: String): Array<String>?
+    external fun getTotalCarvedCount(filePath: String): Int
 
     private lateinit var btnScanStorage: Button
     private lateinit var progressBar: ProgressBar
@@ -130,12 +131,13 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             val results = mutableListOf<RecoveredImage>()
             val seenPaths = mutableSetOf<String>()
+            var totalCarvedCount = 0
 
-            val carvedOutputDir = File(filesDir, "CarvedJpegs").apply {
+            val carvedOutputDir = File(filesDir, "CarvedMedia").apply {
                 if (!exists()) mkdirs()
             }
 
-            // 1. Query MediaStore for JPEG images
+            // 1. Query MediaStore for media files
             try {
                 val projection = arrayOf(
                     MediaStore.Images.Media._ID,
@@ -146,16 +148,12 @@ class MainActivity : AppCompatActivity() {
                     MediaStore.Images.Media.MIME_TYPE
                 )
 
-                val selection = "${MediaStore.Images.Media.MIME_TYPE} = ? OR ${MediaStore.Images.Media.MIME_TYPE} = ?"
-                val selectionArgs = arrayOf("image/jpeg", "image/jpg")
-                val sortOrder = "${MediaStore.Images.Media.DATE_MODIFIED} DESC"
-
                 contentResolver.query(
                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                     projection,
-                    selection,
-                    selectionArgs,
-                    sortOrder
+                    null,
+                    null,
+                    "${MediaStore.Images.Media.DATE_MODIFIED} DESC"
                 )?.use { cursor ->
                     val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
                     val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
@@ -165,7 +163,7 @@ class MainActivity : AppCompatActivity() {
 
                     while (cursor.moveToNext()) {
                         val id = cursor.getLong(idCol)
-                        val name = cursor.getString(nameCol) ?: "unknown.jpg"
+                        val name = cursor.getString(nameCol) ?: "unknown"
                         val size = cursor.getLong(sizeCol)
                         val path = cursor.getString(dataCol) ?: continue
                         val date = cursor.getLong(dateCol)
@@ -180,23 +178,26 @@ class MainActivity : AppCompatActivity() {
                 e.printStackTrace()
             }
 
-            // 2. Explicitly scan hidden directories (/DCIM/.thumbnails, WhatsApp media caches, etc.)
+            // 2. Explicitly scan hidden directories (/DCIM/.thumbnails, WhatsApp, Telegram, caches)
             val externalDir = Environment.getExternalStorageDirectory()
             val hiddenDirsToScan = listOfNotNull(
                 File(externalDir, "DCIM/.thumbnails"),
                 File(externalDir, "Pictures/.thumbnails"),
                 File(externalDir, "WhatsApp/Media/WhatsApp Images"),
-                File(externalDir, "WhatsApp/Media/WhatsApp Images/Sent"),
-                File(externalDir, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images"),
-                File(externalDir, "Android/data/com.whatsapp/cache"),
+                File(externalDir, "WhatsApp/Media/WhatsApp Video"),
+                File(externalDir, "WhatsApp/Media/WhatsApp Audio"),
                 File(externalDir, "Telegram/Telegram Images"),
+                File(externalDir, "Telegram/Telegram Video"),
+                File(externalDir, "Android/data/com.whatsapp/cache"),
                 cacheDir,
                 getExternalFilesDir(null)
             )
 
             for (dir in hiddenDirsToScan) {
                 if (dir.exists() && dir.isDirectory) {
-                    scanHiddenDirectory(dir, results, seenPaths, carvedOutputDir)
+                    scanHiddenDirectory(dir, results, seenPaths, carvedOutputDir) { count ->
+                        totalCarvedCount += count
+                    }
                 }
             }
 
@@ -209,10 +210,10 @@ class MainActivity : AppCompatActivity() {
 
                 if (recoveredList.isEmpty()) {
                     tvEmptyState.visibility = View.VISIBLE
-                    tvStatus.text = "Scan complete. No JPEG images or deleted thumbnails found."
+                    tvStatus.text = "Scan complete. No media files or carved artifacts found."
                 } else {
                     tvEmptyState.visibility = View.GONE
-                    tvStatus.text = String.format(Locale.getDefault(), "Scan complete. Found %d recovered JPEG(s).", recoveredList.size)
+                    tvStatus.text = String.format(Locale.getDefault(), "Scan complete. Found %d items (%d deep-carved).", recoveredList.size, totalCarvedCount)
                 }
             }
         }
@@ -222,13 +223,15 @@ class MainActivity : AppCompatActivity() {
         dir: File,
         results: MutableList<RecoveredImage>,
         seenPaths: MutableSet<String>,
-        carvedOutputDir: File
+        carvedOutputDir: File,
+        onCarved: (Int) -> Unit
     ) {
         val files = dir.listFiles() ?: return
+        var carvedInDir = 0
         for (file in files) {
             try {
                 if (file.isDirectory) {
-                    scanHiddenDirectory(file, results, seenPaths, carvedOutputDir)
+                    scanHiddenDirectory(file, results, seenPaths, carvedOutputDir, onCarved)
                 } else if (file.isFile) {
                     val path = file.absolutePath
                     if (!seenPaths.contains(path)) {
@@ -236,32 +239,34 @@ class MainActivity : AppCompatActivity() {
                         val name = file.name
                         val lowerName = name.lowercase(Locale.getDefault())
 
-                        if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg") || lowerName.endsWith(".thumbdata") || lowerName.contains("thumb")) {
-                            // Carve JPEGs using C++ native carver (0xFFD8FF / 0xFFD9)
-                            try {
-                                val carvedArray = carveJpegsFromBinary(path, carvedOutputDir.absolutePath)
-                                if (carvedArray != null && carvedArray.isNotEmpty()) {
-                                    carvedArray.forEach { carvedInfo ->
-                                        val parts = carvedInfo.split("|")
-                                        if (parts.size >= 4) {
-                                            val savedPath = parts[3]
-                                            val carvedFile = File(savedPath)
-                                            if (carvedFile.exists() && carvedFile.length() > 0) {
-                                                results.add(
-                                                    RecoveredImage(
-                                                        id = savedPath.hashCode().toLong(),
-                                                        name = carvedFile.name,
-                                                        size = carvedFile.length(),
-                                                        path = savedPath,
-                                                        uri = Uri.fromFile(carvedFile),
-                                                        dateModified = file.lastModified() / 1000
-                                                    )
+                        // Deep carve using C++ native carver for JPEG, MP4, MP3
+                        try {
+                            val carvedArray = carveMediaFilesFromBinary(path, carvedOutputDir.absolutePath)
+                            if (carvedArray != null && carvedArray.isNotEmpty()) {
+                                carvedArray.forEach { carvedInfo ->
+                                    val parts = carvedInfo.split("|")
+                                    if (parts.size >= 4) {
+                                        val type = parts[0]
+                                        val savedPath = parts[3]
+                                        val carvedFile = File(savedPath)
+                                        if (carvedFile.exists() && carvedFile.length() > 0) {
+                                            carvedInDir++
+                                            results.add(
+                                                RecoveredImage(
+                                                    id = savedPath.hashCode().toLong(),
+                                                    name = "[$type] ${carvedFile.name}",
+                                                    size = carvedFile.length(),
+                                                    path = savedPath,
+                                                    uri = Uri.fromFile(carvedFile),
+                                                    dateModified = file.lastModified() / 1000
                                                 )
-                                            }
+                                            )
                                         }
                                     }
-                                } else {
-                                    // Add as normal file if it's already a valid image
+                                }
+                            } else {
+                                // Add as regular file if match or thumbnail
+                                if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg") || lowerName.endsWith(".mp4") || lowerName.endsWith(".mp3") || lowerName.contains("thumb")) {
                                     results.add(
                                         RecoveredImage(
                                             id = path.hashCode().toLong(),
@@ -273,15 +278,18 @@ class MainActivity : AppCompatActivity() {
                                         )
                                     )
                                 }
-                            } catch (e: Exception) {
-                                e.printStackTrace()
                             }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
                         }
                     }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
             }
+        }
+        if (carvedInDir > 0) {
+            onCarved(carvedInDir)
         }
     }
 }
