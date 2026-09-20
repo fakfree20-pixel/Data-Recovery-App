@@ -25,9 +25,6 @@ jobs:
       with:
         cache-disabled: true
 
-    - name: Decode Debug Keystore
-      run: base64 -d debug.keystore.base64 > debug.keystore
-
     - name: Build Debug APK with Gradle
       run: gradle assembleDebug
 
